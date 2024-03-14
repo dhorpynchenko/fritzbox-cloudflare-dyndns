@@ -2,14 +2,18 @@ package cloudflare
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
 	cf "github.com/cloudflare/cloudflare-go"
 	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/logging"
 	"golang.org/x/net/publicsuffix"
-	"log/slog"
-	"net"
-	"strings"
-	"time"
 )
 
 type Action struct {
@@ -59,6 +63,10 @@ func (u *Updater) InitWithToken(token string) error {
 		return err
 	}
 
+	if err = InitRetryPolicy(api); err != nil {
+		return err
+	}
+
 	return u.init(api)
 }
 
@@ -69,7 +77,41 @@ func (u *Updater) InitWithKey(email string, key string) error {
 		return err
 	}
 
+	if err = InitRetryPolicy(api); err != nil {
+		return err
+	}
+
 	return u.init(api)
+}
+
+func InitRetryPolicy(api *cf.API) error {
+	retryPolicy := os.Getenv("CLOUDFLARE_RETRY_POLICY")
+	if retryPolicy == "" {
+		return nil
+	}
+
+	retryPolicySplit := strings.Split(retryPolicy, " ")
+
+	var maxRetries, minRetryDelaySeconds, maxRetryDelaySecs int
+	var err error
+	maxRetries, err = strconv.Atoi(retryPolicySplit[0])
+	if err != nil {
+		return errors.New("Failed to parse retry policy's maxRetries: " + err.Error())
+	}
+
+	minRetryDelaySeconds, err = strconv.Atoi(retryPolicySplit[1])
+	if err != nil {
+		return errors.New("Failed to parse retry policy's minRetryDelaySeconds: " + err.Error())
+	}
+
+	maxRetryDelaySecs, err = strconv.Atoi(retryPolicySplit[2])
+
+	if err != nil {
+		return errors.New("Failed to parse retry policy's maxRetryDelaySecs: " + err.Error())
+	}
+
+	cf.UsingRetryPolicy(maxRetries, minRetryDelaySeconds, maxRetryDelaySecs)(api)
+	return nil
 }
 
 func (u *Updater) init(api *cf.API) error {
