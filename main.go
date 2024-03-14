@@ -1,11 +1,7 @@
 package main
 
 import (
-	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/avm"
-	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/cloudflare"
-	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/dyndns"
-	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/logging"
-	"github.com/joho/godotenv"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -15,13 +11,24 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/avm"
+	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/cloudflare"
+	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/dyndns"
+	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/logging"
+	"github.com/joho/godotenv"
 )
 
 func main() {
 	// Load any env variables defined in .env.dev files
 	_ = godotenv.Load(".env", ".env.dev")
 
-	updater := newUpdater()
+	updater, error := newUpdater()
+	if error != nil {
+		slog.Error("Failed to initialize the updater: " + error.Error())
+		os.Exit(1)
+		return
+	}
 	updater.StartWorker()
 
 	ipv6LocalAddress := os.Getenv("DEVICE_LOCAL_ADDRESS_IPV6")
@@ -85,7 +92,7 @@ func newFritzBox() *avm.FritzBox {
 	return fb
 }
 
-func newUpdater() *cloudflare.Updater {
+func newUpdater() (*cloudflare.Updater, error) {
 	u := cloudflare.NewUpdater(slog.Default())
 
 	token := os.Getenv("CLOUDFLARE_API_TOKEN")
@@ -94,8 +101,7 @@ func newUpdater() *cloudflare.Updater {
 
 	if token == "" {
 		if email == "" || key == "" {
-			slog.Info("Env CLOUDFLARE_API_TOKEN not found, disabling CloudFlare updates")
-			return u
+			return nil, errors.New("No CloudFlare token or email&key pair was provided.")
 		} else {
 			slog.Warn("Using deprecated credentials via the API key")
 		}
@@ -105,8 +111,7 @@ func newUpdater() *cloudflare.Updater {
 	ipv6Zone := os.Getenv("CLOUDFLARE_ZONES_IPV6")
 
 	if ipv4Zone == "" && ipv6Zone == "" {
-		slog.Warn("Env CLOUDFLARE_ZONES_IPV4 and CLOUDFLARE_ZONES_IPV6 not found, disabling CloudFlare updates")
-		return u
+		return nil, errors.New("Env CLOUDFLARE_ZONES_IPV4 and CLOUDFLARE_ZONES_IPV6 not found")
 	}
 
 	if ipv4Zone != "" {
@@ -126,11 +131,11 @@ func newUpdater() *cloudflare.Updater {
 	}
 
 	if err != nil {
-		slog.Error("Failed to init Cloudflare updater, disabling CloudFlare updates")
-		return u
+		slog.Error("Failed to init Cloudflare updater: " + err.Error())
+		return nil, err
 	}
 
-	return u
+	return u, nil
 }
 
 func startPushServer(out chan<- *net.IP, localIp *net.IP) {
