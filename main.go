@@ -102,7 +102,7 @@ func newUpdater() (updater.Updater, error) {
 
 	updaterOptions := updater.NewUpdaterOptions(ipv4Zone, ipv6Zone)
 
-	if updaterType := os.Getenv("UPDATER"); updaterType == "" || strings.EqualFold(updaterType, "NOOP") {
+	if updaterType := os.Getenv("UPDATER"); strings.EqualFold(updaterType, "NOOP") {
 		return updater.NewNoOPUpdater(updaterOptions, slog.Default()), nil
 	}
 

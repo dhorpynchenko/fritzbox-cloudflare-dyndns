@@ -67,6 +67,18 @@ func NewCloudflareUpdater(options *UpdaterOptions, configs *CloudFlareConfigs, l
 
 	err := updater.InitApi()
 
+	if err != nil {
+		return nil, err
+	}
+
+	err = updater.init()
+
+	if err != nil {
+		return nil, err
+	}
+
+	updater.StartWorker()
+
 	return updater, err
 }
 
@@ -82,6 +94,8 @@ func (u *CloudflareUpdater) InitApi() error {
 	if err != nil {
 		return err
 	}
+
+	u.api = api
 
 	if u.configs.retryPolicy != "" {
 
@@ -111,7 +125,7 @@ func (u *CloudflareUpdater) InitApi() error {
 	return nil
 }
 
-func (u *CloudflareUpdater) init(api *cf.API) error {
+func (u *CloudflareUpdater) init() error {
 	// Create unique list of zones and fetch their CloudFlare zone IDs
 	zoneIdMap := make(map[string]string)
 
@@ -130,7 +144,7 @@ func (u *CloudflareUpdater) init(api *cf.API) error {
 			return err
 		}
 
-		id, err := api.ZoneIDByName(zone)
+		id, err := u.api.ZoneIDByName(zone)
 
 		if err != nil {
 			return err
@@ -160,7 +174,6 @@ func (u *CloudflareUpdater) init(api *cf.API) error {
 		u.actions = append(u.actions, a)
 	}
 
-	u.api = api
 	u.isInit = true
 
 	return nil
