@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/avm"
-	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/cloudflare"
 	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/dyndns"
 	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/logging"
+	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/updater"
 	"github.com/joho/godotenv"
 )
 
@@ -29,7 +29,6 @@ func main() {
 		os.Exit(1)
 		return
 	}
-	updater.StartWorker()
 
 	ipv6LocalAddress := os.Getenv("DEVICE_LOCAL_ADDRESS_IPV6")
 
@@ -43,8 +42,8 @@ func main() {
 		slog.Info("Using the IPv6 Prefix to construct the IPv6 Address")
 	}
 
-	startPollServer(updater.In, &localIp)
-	startPushServer(updater.In, &localIp)
+	startPollServer(updater, &localIp)
+	startPushServer(updater, &localIp)
 
 	shutdown := make(chan os.Signal)
 
@@ -92,8 +91,20 @@ func newFritzBox() *avm.FritzBox {
 	return fb
 }
 
-func newUpdater() (*cloudflare.Updater, error) {
-	u := cloudflare.NewUpdater(slog.Default())
+func newUpdater() (updater.Updater, error) {
+
+	ipv4Zone := splitZones(os.Getenv("CLOUDFLARE_ZONES_IPV4"))
+	ipv6Zone := splitZones(os.Getenv("CLOUDFLARE_ZONES_IPV6"))
+
+	if len(ipv4Zone) == 0 && len(ipv6Zone) == 0 {
+		return nil, errors.New("Env CLOUDFLARE_ZONES_IPV4 and CLOUDFLARE_ZONES_IPV6 not found")
+	}
+
+	updaterOptions := updater.NewUpdaterOptions(ipv4Zone, ipv6Zone)
+
+	if updaterType := os.Getenv("UPDATER"); updaterType == "" || strings.EqualFold(updaterType, "NOOP") {
+		return updater.NewNoOPUpdater(updaterOptions, slog.Default()), nil
+	}
 
 	token := os.Getenv("CLOUDFLARE_API_TOKEN")
 	email := os.Getenv("CLOUDFLARE_API_EMAIL")
@@ -107,38 +118,22 @@ func newUpdater() (*cloudflare.Updater, error) {
 		}
 	}
 
-	ipv4Zone := os.Getenv("CLOUDFLARE_ZONES_IPV4")
-	ipv6Zone := os.Getenv("CLOUDFLARE_ZONES_IPV6")
+	retryPolicy := os.Getenv("CLOUDFLARE_RETRY_POLICY")
 
-	if ipv4Zone == "" && ipv6Zone == "" {
-		return nil, errors.New("Env CLOUDFLARE_ZONES_IPV4 and CLOUDFLARE_ZONES_IPV6 not found")
-	}
+	cloudflareConfigs := updater.NewCLoudflareConfigs(token, email, key, retryPolicy)
 
-	if ipv4Zone != "" {
-		u.SetIPv4Zones(ipv4Zone)
-	}
-
-	if ipv6Zone != "" {
-		u.SetIPv6Zones(ipv6Zone)
-	}
-
-	var err error
-
-	if token != "" {
-		err = u.InitWithToken(token)
-	} else {
-		err = u.InitWithKey(email, key)
-	}
-
-	if err != nil {
-		slog.Error("Failed to init Cloudflare updater: " + err.Error())
-		return nil, err
-	}
-
-	return u, nil
+	return updater.NewCloudflareUpdater(updaterOptions, cloudflareConfigs, slog.Default())
 }
 
-func startPushServer(out chan<- *net.IP, localIp *net.IP) {
+func splitZones(zones string) []string {
+	if zones == "" {
+		return make([]string, 0)
+	} else {
+		return strings.Split(zones, ",")
+	}
+}
+
+func startPushServer(updater updater.Updater, localIp *net.IP) {
 	bind := os.Getenv("DYNDNS_SERVER_BIND")
 
 	if bind == "" {
@@ -146,7 +141,7 @@ func startPushServer(out chan<- *net.IP, localIp *net.IP) {
 		return
 	}
 
-	server := dyndns.NewServer(out, localIp, slog.Default())
+	server := dyndns.NewServer(updater, localIp, slog.Default())
 	server.Username = os.Getenv("DYNDNS_SERVER_USERNAME")
 	server.Password = os.Getenv("DYNDNS_SERVER_PASSWORD")
 
@@ -163,7 +158,7 @@ func startPushServer(out chan<- *net.IP, localIp *net.IP) {
 	}()
 }
 
-func startPollServer(out chan<- *net.IP, localIp *net.IP) {
+func startPollServer(updater updater.Updater, localIp *net.IP) {
 	fritzbox := newFritzBox()
 
 	// Import endpoint polling interval duration
@@ -200,7 +195,7 @@ func startPollServer(out chan<- *net.IP, localIp *net.IP) {
 				if err != nil {
 					slog.Warn("Failed to poll WAN IPv4 from router", logging.ErrorAttr(err))
 				} else {
-					out <- &ipv4
+					updater.OnNewIp(&ipv4)
 					if !lastV4.Equal(ipv4) {
 						slog.Info("New WAN IPv4 found", slog.Any("ipv4", ipv4))
 						lastV4 = ipv4
@@ -216,7 +211,7 @@ func startPollServer(out chan<- *net.IP, localIp *net.IP) {
 				} else {
 					if !lastV6.Equal(ipv6) {
 						slog.Info("New WAN IPv6 found", slog.Any("ipv6", ipv6))
-						out <- &ipv6
+						updater.OnNewIp(&ipv6)
 						lastV6 = ipv6
 					}
 				}
@@ -246,7 +241,7 @@ func startPollServer(out chan<- *net.IP, localIp *net.IP) {
 
 					slog.Info("New IPv6 Prefix found", slog.Any("prefix", prefix), slog.Any("ipv6", constructedIp))
 
-					out <- &constructedIp
+					updater.OnNewIp(&constructedIp)
 
 					if !lastV6.Equal(prefix.IP) {
 						lastV6 = prefix.IP
