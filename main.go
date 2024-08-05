@@ -37,6 +37,7 @@ func main() {
 		localIp = net.ParseIP(ipv6LocalAddress)
 		if localIp == nil {
 			slog.Error("Failed to parse IP from DEVICE_LOCAL_ADDRESS_IPV6, exiting")
+			os.Exit(1)
 			return
 		}
 		slog.Info("Using the IPv6 Prefix to construct the IPv6 Address")
@@ -66,7 +67,7 @@ func newFritzBox() *avm.FritzBox {
 
 		if err != nil {
 			slog.Error("Failed to parse env FRITZBOX_ENDPOINT_URL", logging.ErrorAttr(err))
-			panic(err)
+			os.Exit(1)
 		}
 
 		fb.Url = strings.TrimRight(v.String(), "/")
@@ -155,6 +156,7 @@ func startPushServer(updater updater.Updater, localIp *net.IP) {
 	go func() {
 		err := s.ListenAndServe()
 		slog.Error("Server stopped", logging.ErrorAttr(err))
+		os.Exit(1)
 	}()
 }
 

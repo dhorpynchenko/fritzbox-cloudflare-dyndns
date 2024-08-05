@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -237,6 +238,7 @@ func (u *CloudflareUpdater) spawnWorker() {
 
 				if err != nil {
 					alog.Error("Action failed, could not research DNS records", logging.ErrorAttr(err))
+					os.Exit(1)
 					continue
 				}
 
@@ -257,6 +259,7 @@ func (u *CloudflareUpdater) spawnWorker() {
 
 					if err != nil {
 						alog.Error("Action failed, could not create DNS record", logging.ErrorAttr(err))
+						os.Exit(1)
 						continue
 					}
 				}
@@ -280,6 +283,7 @@ func (u *CloudflareUpdater) spawnWorker() {
 
 					if err != nil {
 						alog.Error("Action failed, could not update DNS record", logging.ErrorAttr(err))
+						os.Exit(1)
 						continue
 					}
 				}
