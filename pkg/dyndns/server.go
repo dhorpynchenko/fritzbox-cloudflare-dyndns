@@ -27,7 +27,7 @@ func NewServer(updater updater.Updater, localIp *net.IP, log *slog.Logger) *Serv
 }
 
 // Handler offers a simple HTTP handler func for an HTTP server.
-// It expects the IP address parameters and will relay them towards the CloudFlare updater
+// It expects the IP address parameters and will relay them towards the Cloudflare updater
 // worker once they get submitted.
 //
 // Expected parameters can be

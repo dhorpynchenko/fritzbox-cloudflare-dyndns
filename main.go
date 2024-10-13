@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net"
@@ -30,6 +31,8 @@ func main() {
 		return
 	}
 
+	ctx, cancel := context.WithCancelCause(context.Background())
+
 	ipv6LocalAddress := os.Getenv("DEVICE_LOCAL_ADDRESS_IPV6")
 
 	var localIp net.IP
@@ -44,14 +47,22 @@ func main() {
 	}
 
 	startPollServer(updater, &localIp)
-	startPushServer(updater, &localIp)
+	startPushServer(updater, &localIp, cancel)
 
+	// Create a OS signal shutdown channel
 	shutdown := make(chan os.Signal)
 
 	signal.Notify(shutdown, syscall.SIGTERM)
 	signal.Notify(shutdown, syscall.SIGINT)
 
-	<-shutdown
+	// Wait for either the context to finish or the shutdown signal
+	select {
+	case <-ctx.Done():
+		slog.Error("Context closed", logging.ErrorAttr(context.Cause(ctx)))
+		os.Exit(1)
+	case <-shutdown:
+		break
+	}
 
 	slog.Info("Shutdown detected")
 }
@@ -113,7 +124,7 @@ func newUpdater() (updater.Updater, error) {
 
 	if token == "" {
 		if email == "" || key == "" {
-			return nil, errors.New("No CloudFlare token or email&key pair was provided.")
+			return nil, errors.New("No Cloudflare token or email&key pair was provided.")
 		} else {
 			slog.Warn("Using deprecated credentials via the API key")
 		}
@@ -134,7 +145,7 @@ func splitZones(zones string) []string {
 	}
 }
 
-func startPushServer(updater updater.Updater, localIp *net.IP) {
+func startPushServer(updater updater.Updater, localIp *net.IP, cancel context.CancelCauseFunc) {
 	bind := os.Getenv("DYNDNS_SERVER_BIND")
 
 	if bind == "" {
@@ -148,15 +159,14 @@ func startPushServer(updater updater.Updater, localIp *net.IP) {
 
 	s := &http.Server{
 		Addr:     bind,
-		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelInfo),
+		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
 	}
 
 	http.HandleFunc("/ip", server.Handler)
 
 	go func() {
 		err := s.ListenAndServe()
-		slog.Error("Server stopped", logging.ErrorAttr(err))
-		os.Exit(1)
+		cancel(errors.Join(errors.New("http server error"), err))
 	}()
 }
 

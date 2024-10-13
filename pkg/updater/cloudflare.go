@@ -127,7 +127,8 @@ func (u *CloudflareUpdater) InitApi() error {
 }
 
 func (u *CloudflareUpdater) init() error {
-	// Create unique list of zones and fetch their CloudFlare zone IDs
+	// Create unique list of zones and fetch their Cloudflare zone IDs
+
 	zoneIdMap := make(map[string]string)
 
 	for _, val := range u.options.ipv4Zones {
