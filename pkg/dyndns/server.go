@@ -1,25 +1,27 @@
 package dyndns
 
 import (
-	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/logging"
 	"log/slog"
 	"net"
 	"net/http"
+
+	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/logging"
+	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/updater"
 )
 
 type Server struct {
 	log     *slog.Logger
-	out     chan<- *net.IP
+	updater updater.Updater
 	localIp *net.IP
 
 	Username string
 	Password string
 }
 
-func NewServer(out chan<- *net.IP, localIp *net.IP, log *slog.Logger) *Server {
+func NewServer(updater updater.Updater, localIp *net.IP, log *slog.Logger) *Server {
 	return &Server{
 		log:     log.With(slog.String("module", "dyndns")),
-		out:     out,
+		updater: updater,
 		localIp: localIp,
 	}
 }
@@ -54,7 +56,7 @@ func (s *Server) Handler(w http.ResponseWriter, r *http.Request) {
 	ipv4 := net.ParseIP(params.Get("v4"))
 	if ipv4 != nil && ipv4.To4() != nil {
 		s.log.Info("Forwarding update request for IPv4", slog.Any("ipv4", ipv4))
-		s.out <- &ipv4
+		s.updater.OnNewIp(&ipv4)
 	}
 
 	if *s.localIp == nil {
@@ -62,7 +64,7 @@ func (s *Server) Handler(w http.ResponseWriter, r *http.Request) {
 		ipv6 := net.ParseIP(params.Get("v6"))
 		if ipv6 != nil && ipv6.To4() == nil {
 			s.log.Info("Forwarding update request for IPv6", slog.Any("ipv6", ipv6))
-			s.out <- &ipv6
+			s.updater.OnNewIp(&ipv6)
 		}
 	} else {
 		// Parse Prefix
@@ -90,7 +92,7 @@ func (s *Server) Handler(w http.ResponseWriter, r *http.Request) {
 			}
 
 			s.log.Info("Forwarding update request for IPv6", slog.Any("prefix", prefix), slog.Any("ipv6", constructedIp))
-			s.out <- &constructedIp
+			s.updater.OnNewIp(&constructedIp)
 		}
 	}
 

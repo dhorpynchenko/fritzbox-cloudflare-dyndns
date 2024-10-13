@@ -1,15 +1,19 @@
-package cloudflare
+package updater
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
 	cf "github.com/cloudflare/cloudflare-go"
 	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/logging"
 	"golang.org/x/net/publicsuffix"
-	"log/slog"
-	"net"
-	"strings"
-	"time"
 )
 
 type Action struct {
@@ -18,69 +22,120 @@ type Action struct {
 	IpVersion int
 }
 
-type Updater struct {
-	ipv4Zones []string
-	ipv6Zones []string
+type CloudFlareConfigs struct {
+	token string
+
+	email string
+	key   string
+
+	retryPolicy string
+}
+
+type CloudflareUpdater struct {
+	options *UpdaterOptions
+	configs *CloudFlareConfigs
 
 	actions []*Action
 
 	isInit bool
-	api    *cf.API
+	In     chan *net.IP
 	log    *slog.Logger
 
-	In chan *net.IP
-
-	lastIpv4 *net.IP
-	lastIpv6 *net.IP
+	api *cf.API
 }
 
-func NewUpdater(log *slog.Logger) *Updater {
-	return &Updater{
-		isInit:    false,
-		In:        make(chan *net.IP, 10),
-		log:       log.With(slog.String("module", "cloudflare")),
-		ipv4Zones: make([]string, 0),
-		ipv6Zones: make([]string, 0),
+func (updater *CloudflareUpdater) OnNewIp(ip *net.IP) {
+	updater.In <- ip
+}
+
+func NewCLoudflareConfigs(token string, email string, key string, retryPolicy string) *CloudFlareConfigs {
+	return &CloudFlareConfigs{
+		token:       token,
+		email:       email,
+		key:         key,
+		retryPolicy: retryPolicy,
 	}
 }
 
-func (u *Updater) SetIPv4Zones(zones string) {
-	u.ipv4Zones = strings.Split(zones, ",")
+func NewCloudflareUpdater(options *UpdaterOptions, configs *CloudFlareConfigs, log *slog.Logger) (Updater, error) {
+	updater := &CloudflareUpdater{
+		isInit:  false,
+		In:      make(chan *net.IP, 10),
+		log:     log.With(slog.String("updater", "cloudflare")),
+		options: options,
+		configs: configs,
+	}
+
+	err := updater.InitApi()
+
+	if err != nil {
+		return nil, err
+	}
+
+	err = updater.init()
+
+	if err != nil {
+		return nil, err
+	}
+
+	updater.StartWorker()
+
+	return updater, err
 }
 
-func (u *Updater) SetIPv6Zones(zones string) {
-	u.ipv6Zones = strings.Split(zones, ",")
-}
-
-func (u *Updater) InitWithToken(token string) error {
-	api, err := cf.NewWithAPIToken(token)
+func (u *CloudflareUpdater) InitApi() error {
+	var api *cf.API
+	var err error
+	if u.configs.token == "" {
+		api, err = cf.New(u.configs.key, u.configs.email)
+	} else {
+		api, err = cf.NewWithAPIToken(u.configs.token)
+	}
 
 	if err != nil {
 		return err
 	}
 
-	return u.init(api)
-}
+	u.api = api
 
-func (u *Updater) InitWithKey(email string, key string) error {
-	api, err := cf.New(key, email)
+	if u.configs.retryPolicy != "" {
 
-	if err != nil {
-		return err
+		retryPolicySplit := strings.Split(u.configs.retryPolicy, " ")
+
+		var maxRetries, minRetryDelaySeconds, maxRetryDelaySecs int
+		maxRetries, err = strconv.Atoi(retryPolicySplit[0])
+		if err != nil {
+			return errors.New("Failed to parse retry policy's maxRetries: " + err.Error())
+		}
+
+		minRetryDelaySeconds, err = strconv.Atoi(retryPolicySplit[1])
+		if err != nil {
+			return errors.New("Failed to parse retry policy's minRetryDelaySeconds: " + err.Error())
+		}
+
+		maxRetryDelaySecs, err = strconv.Atoi(retryPolicySplit[2])
+
+		if err != nil {
+			return errors.New("Failed to parse retry policy's maxRetryDelaySecs: " + err.Error())
+		}
+
+		u.log.Info(fmt.Sprintf("Setting Cloudflare retry policy. MaxRetries %d, minRetryDelaySeconds %ds, maxRetryDelaySeconds %ds.",
+			maxRetries, minRetryDelaySeconds, maxRetryDelaySecs))
+		cf.UsingRetryPolicy(maxRetries, minRetryDelaySeconds, maxRetryDelaySecs)(api)
 	}
-
-	return u.init(api)
+	return nil
 }
 
-func (u *Updater) init(api *cf.API) error {
+func (u *CloudflareUpdater) init() error {
 	// Create unique list of zones and fetch their Cloudflare zone IDs
+
 	zoneIdMap := make(map[string]string)
 
-	for _, val := range u.ipv4Zones {
+	for _, val := range u.options.ipv4Zones {
 		zoneIdMap[val] = ""
 	}
 
-	for _, val := range u.ipv6Zones {
+	for _, val := range u.options.ipv6Zones {
 		zoneIdMap[val] = ""
 	}
 
@@ -91,7 +146,7 @@ func (u *Updater) init(api *cf.API) error {
 			return err
 		}
 
-		id, err := api.ZoneIDByName(zone)
+		id, err := u.api.ZoneIDByName(zone)
 
 		if err != nil {
 			return err
@@ -101,7 +156,7 @@ func (u *Updater) init(api *cf.API) error {
 	}
 
 	// Now create an updater action list
-	for _, val := range u.ipv4Zones {
+	for _, val := range u.options.ipv4Zones {
 		a := &Action{
 			DnsRecord: val,
 			CfZoneId:  zoneIdMap[val],
@@ -111,7 +166,7 @@ func (u *Updater) init(api *cf.API) error {
 		u.actions = append(u.actions, a)
 	}
 
-	for _, val := range u.ipv6Zones {
+	for _, val := range u.options.ipv6Zones {
 		a := &Action{
 			DnsRecord: val,
 			CfZoneId:  zoneIdMap[val],
@@ -121,13 +176,12 @@ func (u *Updater) init(api *cf.API) error {
 		u.actions = append(u.actions, a)
 	}
 
-	u.api = api
 	u.isInit = true
 
 	return nil
 }
 
-func (u *Updater) StartWorker() {
+func (u *CloudflareUpdater) StartWorker() {
 	if !u.isInit {
 		return
 	}
@@ -135,16 +189,16 @@ func (u *Updater) StartWorker() {
 	go u.spawnWorker()
 }
 
-func (u *Updater) spawnWorker() {
+func (u *CloudflareUpdater) spawnWorker() {
 	for {
 		select {
 		case ip := <-u.In:
 			if ip.To4() == nil {
-				if u.lastIpv6 != nil && u.lastIpv6.Equal(*ip) {
+				if u.options.lastIpv6 != nil && u.options.lastIpv6.Equal(*ip) {
 					continue
 				}
 			} else {
-				if u.lastIpv4 != nil && u.lastIpv4.Equal(*ip) {
+				if u.options.lastIpv4 != nil && u.options.lastIpv4.Equal(*ip) {
 					continue
 				}
 			}
@@ -185,6 +239,7 @@ func (u *Updater) spawnWorker() {
 
 				if err != nil {
 					alog.Error("Action failed, could not research DNS records", logging.ErrorAttr(err))
+					os.Exit(1)
 					continue
 				}
 
@@ -205,6 +260,7 @@ func (u *Updater) spawnWorker() {
 
 					if err != nil {
 						alog.Error("Action failed, could not create DNS record", logging.ErrorAttr(err))
+						os.Exit(1)
 						continue
 					}
 				}
@@ -228,6 +284,7 @@ func (u *Updater) spawnWorker() {
 
 					if err != nil {
 						alog.Error("Action failed, could not update DNS record", logging.ErrorAttr(err))
+						os.Exit(1)
 						continue
 					}
 				}
@@ -236,9 +293,9 @@ func (u *Updater) spawnWorker() {
 			}
 
 			if ip.To4() == nil {
-				u.lastIpv6 = ip
+				u.options.lastIpv6 = ip
 			} else {
-				u.lastIpv4 = ip
+				u.options.lastIpv4 = ip
 			}
 		}
 	}
