@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/avm"
 	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/cloudflare"
 	"github.com/cromefire/fritzbox-cloudflare-dyndns/pkg/dyndns"
@@ -24,6 +26,8 @@ func main() {
 	updater := newUpdater()
 	updater.StartWorker()
 
+	ctx, cancel := context.WithCancelCause(context.Background())
+
 	ipv6LocalAddress := os.Getenv("DEVICE_LOCAL_ADDRESS_IPV6")
 
 	var localIp net.IP
@@ -37,14 +41,22 @@ func main() {
 	}
 
 	startPollServer(updater.In, &localIp)
-	startPushServer(updater.In, &localIp)
+	startPushServer(updater.In, &localIp, cancel)
 
+	// Create a OS signal shutdown channel
 	shutdown := make(chan os.Signal)
 
 	signal.Notify(shutdown, syscall.SIGTERM)
 	signal.Notify(shutdown, syscall.SIGINT)
 
-	<-shutdown
+	// Wait for either the context to finish or the shutdown signal
+	select {
+	case <-ctx.Done():
+		slog.Error("Context closed", logging.ErrorAttr(context.Cause(ctx)))
+		os.Exit(1)
+	case <-shutdown:
+		break
+	}
 
 	slog.Info("Shutdown detected")
 }
@@ -94,7 +106,7 @@ func newUpdater() *cloudflare.Updater {
 
 	if token == "" {
 		if email == "" || key == "" {
-			slog.Info("Env CLOUDFLARE_API_TOKEN not found, disabling CloudFlare updates")
+			slog.Info("Env CLOUDFLARE_API_TOKEN not found, disabling Cloudflare updates")
 			return u
 		} else {
 			slog.Warn("Using deprecated credentials via the API key")
@@ -105,7 +117,7 @@ func newUpdater() *cloudflare.Updater {
 	ipv6Zone := os.Getenv("CLOUDFLARE_ZONES_IPV6")
 
 	if ipv4Zone == "" && ipv6Zone == "" {
-		slog.Warn("Env CLOUDFLARE_ZONES_IPV4 and CLOUDFLARE_ZONES_IPV6 not found, disabling CloudFlare updates")
+		slog.Warn("Env CLOUDFLARE_ZONES_IPV4 and CLOUDFLARE_ZONES_IPV6 not found, disabling Cloudflare updates")
 		return u
 	}
 
@@ -126,14 +138,14 @@ func newUpdater() *cloudflare.Updater {
 	}
 
 	if err != nil {
-		slog.Error("Failed to init Cloudflare updater, disabling CloudFlare updates")
+		slog.Error("Failed to init Cloudflare updater, disabling Cloudflare updates")
 		return u
 	}
 
 	return u
 }
 
-func startPushServer(out chan<- *net.IP, localIp *net.IP) {
+func startPushServer(out chan<- *net.IP, localIp *net.IP, cancel context.CancelCauseFunc) {
 	bind := os.Getenv("DYNDNS_SERVER_BIND")
 
 	if bind == "" {
@@ -147,14 +159,14 @@ func startPushServer(out chan<- *net.IP, localIp *net.IP) {
 
 	s := &http.Server{
 		Addr:     bind,
-		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelInfo),
+		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
 	}
 
 	http.HandleFunc("/ip", server.Handler)
 
 	go func() {
 		err := s.ListenAndServe()
-		slog.Error("Server stopped", logging.ErrorAttr(err))
+		cancel(errors.Join(errors.New("http server error"), err))
 	}()
 }
 
